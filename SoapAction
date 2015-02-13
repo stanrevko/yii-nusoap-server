@@ -1,0 +1,357 @@
+<?php
+
+/*
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ * @author successus
+ */
+
+function dd($var) {
+    CVarDumper::dump($var, $depth = 10, $highlight = true);
+    exit();
+}
+
+require_once Yii::app()->basePath . '/extensions/nusoap/nusoap.php';
+
+class SoapAction extends CAction {
+
+    const STYLE_RPC = 'rpc';
+    const STYLE_DOCUMENT = 'document';
+    const USE_ENCODED = 'encoded';
+    const USE_LITERAL = 'literal';
+          
+    /**
+     * @var string
+     * soap:service name
+     */
+    public $servicename = 'yiiwsdl';
+
+    
+    /**
+     * @var soap_server  Web service instance currently being used
+     */
+    private $_service;
+    
+    private $_procedurs = array();
+
+    /**
+     * @var array
+     * soap:operation style
+     */
+    public $bindingStyle = self::STYLE_RPC;
+    
+    /**
+     * @var array
+     * soap:body operation style options
+     */
+    public $operationBodyStyle = array(
+        'use' => self::USE_ENCODED,
+        'encodingStyle' => 'http://schemas.xmlsoap.org/soap/encoding/',
+    );
+
+
+    /**
+     * @var array  Map of php and soap types of variables
+     */
+    protected static $typeMap = array(
+        'string' => 'xsd:string',
+        'str' => 'xsd:string',
+        'int' => 'xsd:int',
+        'integer' => 'xsd:integer',
+        'float' => 'xsd:float',
+        'double' => 'xsd:float',
+        'bool' => 'xsd:boolean',
+        'boolean' => 'xsd:boolean',
+        'date' => 'xsd:date',
+        'time' => 'xsd:time',
+        'datetime' => 'xsd:dateTime',
+        'array' => 'soap-enc:Array',
+        'object' => 'xsd:struct',
+        'mixed' => 'xsd:anyType',
+    );
+
+    /**
+     * @var array List of complex types used by operations.
+     * If an SOAP operation defines complex input or output type, all objects are included here containing all sub-parameters.
+     * For instance, if an SOAP operation "createUser" requires complex input object "User", then the object "User" will be included here with declared subparameters such as "firstname", "lastname", etc..
+     */
+    protected $types;
+
+    public function run() {
+        $controller = $this->getController();
+        $controllerReflection = new ReflectionClass('SiteController');
+
+        $this->_service = new soap_server();
+
+        //$this->logPath = Yii::app()->basePath . '/log/log.txt';
+        //TODO: change to Yii;
+        $namespace = $URL = "http://" . $_SERVER['HTTP_HOST'];
+
+        $this->_service->decode_utf8 = false;
+        $this->_service->encode_utf8 = true;
+        $this->_service->soap_defencoding = 'UTF-8';
+        $this->_service->configureWSDL('poshwsdl', $namespace);
+        $this->_service->wsdl->schemaTargetNamespace = $namespace;
+
+        //Find all methods of controller with tag @soap
+        $allControllerMethods = get_class_methods($controller);
+        foreach ($allControllerMethods as $methodName) {
+            $method = $controllerReflection->getMethod($methodName);
+            //if it is soap method parse it, and set result to _procedurs
+            if ($this->isSoapMethod($method)) {
+                //Parsed Method data
+                $this->_procedurs[$methodName] = $pmd = $this->parseSoapMethodReflection($method);
+
+               // dd($pmd);
+                $params = array();
+                foreach ($pmd['params'] as $key => $value) {
+                    $params[$key]=$value['type'];
+                }
+                //register service method
+                $this->_service->register(
+                        $methodName,  // method name:
+                        $params,   // parameter list:                        
+                        array('return' => $pmd["return"]["type"]), // return value(s):                       
+                        'urn:'.$this->servicename,  // namespace:                        
+                        'urn:'.$this->servicename.'#'.$methodName,    // soapaction: (use default)                     
+                        $this->bindingStyle,// style: rpc or document
+                        $this->operationBodyStyle['use'],  // use: encoded or literal
+                        !empty($pmd['doc'])? $pmd['doc'] : $methodName // description: documentation for the method
+                );
+            }
+        }
+
+        //dd($this->_procedurs);
+
+        //$this->addType();
+        //$this->setFunctionList();
+        // $this->registerFunctionList();
+
+        global $HTTP_RAW_POST_DATA;
+        $HTTP_RAW_POST_DATA = isset($HTTP_RAW_POST_DATA) ? $HTTP_RAW_POST_DATA : '';
+
+        $this->_service->service($HTTP_RAW_POST_DATA);
+        die();
+    }
+
+    /**
+     * Returns the Web service instance currently being used.
+     * @return CWebService the Web service instance
+     */
+    public function getService() {
+        return $this->_service;
+    }
+
+    /**
+     * @return bool, if($_string contains "\@soap") return true, else return false
+     */
+    public function isSoapMethod($method) {
+        return (strrpos($method->getDocComment(), "@soap"));
+    }
+
+    /**
+     * Parsing of Controller Method Reflection
+     * 
+     * 
+     * @return array structure with will be used for $this->_service->register()
+     */
+    public function parseSoapMethodReflection($method) {
+        $comment = $method->getDocComment();
+        // make line endings consistent: win -> unix, mac -> unix
+        $comment = strtr($comment, array("\r\n" => "\n", "\r" => "\n"));        
+        //$commRes = array('title' => '', 'desc' => '', 'tags' => '');
+        //delete "*" 
+        $comment = $this->stripStars($comment);
+
+        //Parse params
+        $methodParams = $method->getParameters();
+        $parsedParams = $this->_parseTagParams($comment);
+        //get only params, wich are method params
+        foreach ($methodParams as $methodParam) {
+            $paramName = $methodParam->getName();
+            if (isset($parsedParams[$paramName]))
+                $Params[$paramName] = $parsedParams[$paramName];
+            else
+                throw new Exception("Method '" . $method->getName() . "  of '" . get_class($this->getController()) . " ' has no described param with name: '$paramName'");
+        }
+        //TODO: check for exists $parsedParams in $methodParams
+        //parsed method documentation       
+        if (preg_match('/^\s*([^@]*?)\n@/s', $comment, $matches))
+            $doc = trim($matches[1]);
+        else
+            $doc = '';
+
+        return array(
+            'name' => $method->getName(),
+            'doc' => $doc,
+            'params' => $Params,
+            'return' => $this->_parseTagReturn($comment),
+        );
+    }
+
+    /**
+     * Функция удаляет из строки символы обозначающие блок комментария,  /** * 
+     * @return string
+     */
+    public function stripStars($comment) {
+        //clear comment
+        $comment = preg_replace("/(^\/\*\*|\*\/$)/", "", $comment);
+        $com = explode("\n", $comment);
+        if (false === strpos($com[0], "*"))
+            unset($com[0]);
+        foreach ($com as &$r) {
+            $r = preg_replace("/^\s*\*\s*/", "", $r);
+        }
+
+        return trim(implode("\n", $com));
+    }
+
+    /**
+     * Parsing params of PHPdoc
+     * @return array structure
+     */
+    protected function _parseTagParams($comment) {
+        //TODO: More carefule parse of {(nillable|minOccurs|}
+        $commentA = preg_replace('/^\s*\**(\s*?$|\s*)/m', '', $comment);
+
+        preg_match_all('/^\@param\s+(\w+?)\s+\$(\w+?)\s+([^{^}.]*+)(\{.+?\})?/', $commentA, $matches);
+        preg_match_all('/^@param\s+(\w+?)\s+\$(\w+)(.*)?$/m', $commentA, $matches);
+
+        $Params = array();
+        foreach ($matches[0] as $k => $v) {
+            $param = array();
+            $param["name"] = $matches[2][$k];
+            //if you have exeption, it's meens that some comlex type don't has php Class
+            $param["type"] = $this->processType($matches[1][$k]);
+            $param["description"] = trim($matches[3][$k]);
+            //check third part of @param comment, there is {} in it
+            if (preg_match("/\{[\w\s,=]+\}$/", $param["description"], $attrStr)) {
+                //parse attributes
+                //TODO: Match
+                preg_match_all('/((nillable|minOccurs|maxOccurs)\s{0,3}=\s{0,3}(\d+|true|false)?)+/', $attrStr[0], $res);
+                if (!empty($res[0])) {
+                    foreach ($res[2] as $_k => $_v) {
+                        $attrs[$_v] = $res[3][$_k];
+                    }
+                    $param['attributes'] = $attrs;
+                }
+            }
+            $Params[$param["name"]] = $param;
+        }
+        return $Params;
+    }
+
+    /**
+     * Parse tag return, 
+     * @return array witch consists type of return value and description
+     */
+    private function _parseTagReturn($comment) {
+        if (preg_match('/\@return\s+([\w:]*+)\s+([^@.]*)\n?/', $comment, $res))
+            return array('type' => $this->processType ($res[1]), 'description' => (isset($res[2])? $res[2] : ""));
+        else
+            return false;
+    }
+
+    /**
+     * Function convert Php type to Soap type
+     *     
+     * @param string $type PHP variable type or Classname
+     */
+    protected function processType($type) {
+        if (isset(self::$typeMap[$type]))
+            return self::$typeMap[$type];
+        elseif (isset($this->types[$type]))
+            return is_array($this->types[$type]) ? 'tns:' . $type : $this->types[$type];
+        elseif (($pos = strpos($type, '[]')) !== false) { // array of types
+            $type = substr($type, 0, $pos);
+            $this->types[$type . '[]'] = 'tns:' . $type . 'Array';
+            $this->processType($type);
+            return $this->types[$type . '[]'];
+        } else { // process class / complex type    
+            //TODO: EXEPTION of import unexisting class                    
+            ///if the class is not exists it will do            
+             // generate the class here
+             $type = Yii::import($type, true);
+          
+            $class = new ReflectionClass($type);
+            $comment = $class->getDocComment();
+            $comment = strtr($comment, array("\r\n" => "\n", "\r" => "\n")); // make line endings consistent: win -> unix, mac -> unix
+            $comment = preg_replace('/^\s*\**(\s*?$|\s*)/m', '', $comment);
+            // extract soap indicator flag, if defined, e.g. @soap-indicator sequence
+            // see http://www.w3schools.com/schema/schema_complex_indicators.asp
+            if (preg_match('/^@soap-indicator\s+(\w+)\s*?(.*)$/im', $comment, $matches)) {
+                $indicator = $matches[1];
+                $attributes = $this->getWsdlElementAttributes($matches[2]);
+            } else {
+                $indicator = 'all';
+                $attributes = $this->getWsdlElementAttributes('');
+            }
+            $custom_wsdl = false;
+            if (preg_match_all('/^@soap-wsdl\s+(\S.*)$/im', $comment, $matches) > 0)
+                $custom_wsdl = implode("\n", $matches[1]);
+            $this->types[$type] = array(
+                'indicator' => $indicator,
+                'nillable' => $attributes['nillable'],
+                'minOccurs' => $attributes['minOccurs'],
+                'maxOccurs' => $attributes['maxOccurs'],
+                'custom_wsdl' => $custom_wsdl,
+                'properties' => array()
+            );
+            foreach ($class->getProperties() as $property) {
+                $comment = $property->getDocComment();
+                if ($property->isPublic() && strpos($comment, '@soap') !== false) {
+                    if (preg_match('/@var\s+([\w\.]+(\[\s*\])?)\s*?(.*)$/mi', $comment, $matches)) {
+                        $attributes = $this->getWsdlElementAttributes($matches[3]);
+                        if (preg_match('/{(.+)}/', $comment, $attr))
+                            $matches[3] = str_replace($attr[0], '', $matches[3]);
+                        // extract PHPDoc @example
+                        $example = '';
+                        if (preg_match("/@example[:]?(.+)/mi", $comment, $match))
+                            $example = trim($match[1]);
+                        $this->types[$type]['properties'][$property->getName()] = array(
+                            $this->processType($matches[1]),
+                            trim($matches[3]),
+                            $attributes['nillable'],
+                            $attributes['minOccurs'],
+                            $attributes['maxOccurs'],
+                            $example
+                        ); // name => type, doc, nillable, minOccurs, maxOccurs, example
+                    }
+                }
+            }
+            return 'tns:' . $type;
+        }
+    }
+
+    /**
+     * Parse attributes nillable, minOccurs, maxOccurs
+     * @param string $comment Extracted PHPDoc comment
+     */
+    protected function getWsdlElementAttributes($comment) {
+        $nillable = $minOccurs = $maxOccurs = null;
+        if (preg_match('/{(.+)}/', $comment, $attr)) {
+            if (preg_match_all('/((\w+)\s*=\s*(\w+))/mi', $attr[1], $attr)) {
+                foreach ($attr[2] as $id => $prop) {
+                    $prop = strtolower($prop);
+                    $val = strtolower($attr[3][$id]);
+                    if ($prop == 'nillable') {
+                        if ($val == 'false' || $val == 'true')
+                            $nillable = $val;
+                        else
+                            $nillable = $val ? 'true' : 'false';
+                    }elseif ($prop == 'minoccurs')
+                        $minOccurs = intval($val);
+                    elseif ($prop == 'maxoccurs')
+                        $maxOccurs = ($val == 'unbounded') ? 'unbounded' : intval($val);
+                }
+            }
+        }
+        return array(
+            'nillable' => $nillable,
+            'minOccurs' => $minOccurs,
+            'maxOccurs' => $maxOccurs
+        );
+    }
+
+}
