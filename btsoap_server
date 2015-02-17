@@ -1,0 +1,128 @@
+<?php
+
+/*
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+
+/**
+ * Description of nusoap_wrapper
+ * 
+ * Only for Yii > 1.4.x.x
+ *
+ * @author stanislav
+ */
+class btsoap_server extends nusoap_server {
+
+    public $controller = null;
+
+    /**
+     * invokes a PHP function for the requested SOAP method
+     *
+     * Redeclared for Controller 
+     * The following fields are set by this function (when successful)
+     *
+     * methodreturn
+     *
+     * Note that the PHP function that is called may also set the following
+     * fields to affect the response sent to the client
+     *
+     * responseHeaders
+     * outgoing_headers
+     *
+     * This sets the fault field on error
+     *
+     * @access   private
+     */
+    function invoke_method() {
+        $controller = $this->controller;
+
+        //если мы проставили контроллер  то переопредиляем текущий метод, иначе используем родительский
+        if ($controller !== null && is_subclass_of($controller, "CController")) {
+            $this->debug('in invoke_method, methodname=' . $this->methodname . ' methodURI=' . $this->methodURI . ' SOAPAction=' . $this->SOAPAction);
+
+
+            // if you are debugging in this area of the code, your service uses a class to implement methods,
+            // you use SOAP RPC, and the client is .NET, please be aware of the following...
+            // when the .NET wsdl.exe utility generates a proxy, it will remove the '.' or '..' from the
+            // method name.  that is fine for naming the .NET methods.  it is not fine for properly constructing
+            // the XML request and reading the XML response.  you need to add the RequestElementName and
+            // ResponseElementName to the System.Web.Services.Protocols.SoapRpcMethodAttribute that wsdl.exe
+            // generates for the method.  these parameters are used to specify the correct XML element names
+            // for .NET to use, i.e. the names with the '.' in them.
+            //
+                
+               
+	   $orig_methodname = $this->methodname;
+            $delim = "";
+            if ($this->wsdl) {
+                if ($this->opData = $this->wsdl->getOperationData($this->methodname)) {
+
+                    $this->debug('in invoke_method, found WSDL operation=' . $this->methodname);
+                    $this->appendDebug('opData=' . $this->varDump($this->opData));
+                } elseif ($this->opData = $this->wsdl->getOperationDataForSoapAction($this->SOAPAction)) {
+                    // Note: hopefully this case will only be used for doc/lit, since rpc services should have wrapper element
+                    $this->debug('in invoke_method, found WSDL soapAction=' . $this->SOAPAction . ' for operation=' . $this->opData['name']);
+                    $this->appendDebug('opData=' . $this->varDump($this->opData));
+                    $this->methodname = $this->opData['name'];
+                } else {
+                    $this->debug('in invoke_method, no WSDL for operation=' . $this->methodname);
+                    $this->fault('SOAP-ENV:Client', "Operation '" . $this->methodname . "' is not defined in the WSDL for this service");
+                    return;
+                }
+            } else {
+                $this->debug('in invoke_method, no WSDL to validate method');
+            }
+
+            $this->debug("in invoke_method of $controller->id, delim=$delim");
+
+            $class = get_class($controller);
+            $controllerId = $controller->id;
+            $method = $this->methodname;
+
+            $method_to_compare = (substr(phpversion(), 0, 2) == '4.') ? strtolower($method) : $method;
+            if (!in_array($method_to_compare, get_class_methods($class))) {
+                $this->debug("in invoke_method, method '$this->methodname' not found in class '$class'!");
+                $this->result = 'fault: method not found';
+                $this->fault('SOAP-ENV:Client', "method '$this->methodname'/'$method_to_compare'('$orig_methodname') not defined in service/'$class'('$try_class' '$delim')");
+                return;
+            }
+
+
+            // evaluate message, getting back parameters
+            // verify that request parameters match the method's signature
+            if (!$this->verify_method($this->methodname, $this->methodparams)) {
+                // debug
+                $this->debug('ERROR: request not verified against method signature');
+                $this->result = 'fault: request failed validation against method signature';
+                // return fault
+                $this->fault('SOAP-ENV:Client', "Operation '$this->methodname' not defined in service.");
+                return;
+            }
+
+            // if there are parameters to pass
+            $this->debug('in invoke_method, params:');
+            $this->appendDebug($this->varDump($this->methodparams));
+            $this->debug("in invoke_method, calling '$this->methodname'");
+
+            $this->debug('in invoke_method, calling instance method using call_user_func_array()');
+            //stas code
+
+            $call_arg = array(&$controller, $method);
+
+            if (is_array($this->methodparams)) {
+                $this->methodreturn = call_user_func_array($call_arg, array_values($this->methodparams));
+            } else {
+                $this->methodreturn = call_user_func_array($call_arg, array());
+            }
+
+            $this->debug('in invoke_method, methodreturn:');
+            $this->appendDebug($this->varDump($this->methodreturn));
+            $this->debug("in invoke_method, called method $this->methodname, received data of type " . gettype($this->methodreturn));
+        } else {
+            parent::invoke_method();
+        }
+    }
+
+}
