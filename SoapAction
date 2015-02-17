@@ -5,6 +5,7 @@
  * To change this template file, choose Tools | Templates
  * and open the template in the editor.
  * @author successus
+ * @link https://github.com/successus/yii-nusoap-server
  */
 
 function dd($var) {
@@ -20,19 +21,18 @@ class SoapAction extends CAction {
     const STYLE_DOCUMENT = 'document';
     const USE_ENCODED = 'encoded';
     const USE_LITERAL = 'literal';
-          
+
     /**
      * @var string
      * soap:service name
      */
     public $servicename = 'yiiwsdl';
 
-    
     /**
      * @var soap_server  Web service instance currently being used
      */
     private $_service;
-    
+    private $_wsdl;
     private $_procedurs = array();
 
     /**
@@ -40,7 +40,7 @@ class SoapAction extends CAction {
      * soap:operation style
      */
     public $bindingStyle = self::STYLE_RPC;
-    
+
     /**
      * @var array
      * soap:body operation style options
@@ -49,7 +49,6 @@ class SoapAction extends CAction {
         'use' => self::USE_ENCODED,
         'encodingStyle' => 'http://schemas.xmlsoap.org/soap/encoding/',
     );
-
 
     /**
      * @var array  Map of php and soap types of variables
@@ -79,21 +78,26 @@ class SoapAction extends CAction {
     protected $types;
 
     public function run() {
+        $functionName = "test";
+
         $controller = $this->getController();
         $controllerReflection = new ReflectionClass('SiteController');
 
-        $this->_service = new soap_server();
+        $this->_service = new btsoap_server();
+        
+        $this->_service->controller = $controller;
 
         //$this->logPath = Yii::app()->basePath . '/log/log.txt';
         //TODO: change to Yii;
-        $namespace = $URL = "http://" . $_SERVER['HTTP_HOST'];
+        $namespace = $URL = $controller->createAbsoluteUrl('');
 
         $this->_service->decode_utf8 = false;
         $this->_service->encode_utf8 = true;
         $this->_service->soap_defencoding = 'UTF-8';
-        $this->_service->configureWSDL('poshwsdl', $namespace);
+        $this->_service->configureWSDL($this->servicename, $namespace);
         $this->_service->wsdl->schemaTargetNamespace = $namespace;
-
+        $this->_wsdl = $this->_service->wsdl;      
+        
         //Find all methods of controller with tag @soap
         $allControllerMethods = get_class_methods($controller);
         foreach ($allControllerMethods as $methodName) {
@@ -103,35 +107,33 @@ class SoapAction extends CAction {
                 //Parsed Method data
                 $this->_procedurs[$methodName] = $pmd = $this->parseSoapMethodReflection($method);
 
-               // dd($pmd);
+                //make method avaible
+                //parse params
                 $params = array();
                 foreach ($pmd['params'] as $key => $value) {
-                    $params[$key]=$value['type'];
+                    $params[$key] = $value['type'];
                 }
                 //register service method
                 $this->_service->register(
-                        $methodName,  // method name:
-                        $params,   // parameter list:                        
+                        $methodName, // method name:
+                        $params, // parameter list:                        
                         array('return' => $pmd["return"]["type"]), // return value(s):                       
-                        'urn:'.$this->servicename,  // namespace:                        
-                        'urn:'.$this->servicename.'#'.$methodName,    // soapaction: (use default)                     
-                        $this->bindingStyle,// style: rpc or document
-                        $this->operationBodyStyle['use'],  // use: encoded or literal
-                        !empty($pmd['doc'])? $pmd['doc'] : $methodName // description: documentation for the method
+                        'urn:' . $namespace, // namespace:                        
+                        //$namespace,
+                        'urn:' . $this->servicename . '#' . $methodName, // soapaction: (use default)                     
+                        $this->bindingStyle, // style: rpc or document
+                        $this->operationBodyStyle['use'], // use: encoded or literal
+                        !empty($pmd['doc']) ? $pmd['doc'] : $methodName // description: documentation for the method
                 );
             }
         }
-
-        //dd($this->_procedurs);
-
-        //$this->addType();
-        //$this->setFunctionList();
-        // $this->registerFunctionList();
+        
+        $this->buildWsdl("Site");
 
         global $HTTP_RAW_POST_DATA;
         $HTTP_RAW_POST_DATA = isset($HTTP_RAW_POST_DATA) ? $HTTP_RAW_POST_DATA : '';
-
         $this->_service->service($HTTP_RAW_POST_DATA);
+        Yii::log($this->_service->getDebug(), CLogger::LEVEL_TRACE, "GWS.server");
         die();
     }
 
@@ -159,7 +161,7 @@ class SoapAction extends CAction {
     public function parseSoapMethodReflection($method) {
         $comment = $method->getDocComment();
         // make line endings consistent: win -> unix, mac -> unix
-        $comment = strtr($comment, array("\r\n" => "\n", "\r" => "\n"));        
+        $comment = strtr($comment, array("\r\n" => "\n", "\r" => "\n"));
         //$commRes = array('title' => '', 'desc' => '', 'tags' => '');
         //delete "*" 
         $comment = $this->stripStars($comment);
@@ -248,7 +250,7 @@ class SoapAction extends CAction {
      */
     private function _parseTagReturn($comment) {
         if (preg_match('/\@return\s+([\w:]*+)\s+([^@.]*)\n?/', $comment, $res))
-            return array('type' => $this->processType ($res[1]), 'description' => (isset($res[2])? $res[2] : ""));
+            return array('type' => $this->processType($res[1]), 'description' => (isset($res[2]) ? $res[2] : ""));
         else
             return false;
     }
@@ -271,9 +273,9 @@ class SoapAction extends CAction {
         } else { // process class / complex type    
             //TODO: EXEPTION of import unexisting class                    
             ///if the class is not exists it will do            
-             // generate the class here
-             $type = Yii::import($type, true);
-          
+            // generate the class here
+            $type = Yii::import($type, true);
+
             $class = new ReflectionClass($type);
             $comment = $class->getDocComment();
             $comment = strtr($comment, array("\r\n" => "\n", "\r" => "\n")); // make line endings consistent: win -> unix, mac -> unix
@@ -352,6 +354,42 @@ class SoapAction extends CAction {
             'minOccurs' => $minOccurs,
             'maxOccurs' => $maxOccurs
         );
+    }
+
+    /**
+     * Register WSDL types in nusoap_server instance.
+     *
+     * @param string $className Class name of the provider
+     * @param nusoap_server $server Soap server provided using nusoap     
+     */
+    protected function buildWsdl() {
+        $wsdl = $this->_wsdl;       
+        Yii::log(CVarDumper::dumpAsString($this, 10), CLogger::LEVEL_TRACE, "GWS");
+        // first create complex types
+        // dd($this->types);
+        foreach ($this->types as $name => $def) {
+            if (is_array($def)) {
+                $wsdl->addComplexType($name, 'complexType', 'struct', 'all', '', $def);
+            }
+        }
+       
+        foreach ($this->types as $name => $def) {
+            if (!is_array($def)) {
+                if (($pos = strpos($name, '[]')) !== false) { // if it is an array
+                    $type = substr($name, 0, $pos);
+                    $wsdl->addComplexType(
+                            $def,
+                            'complexType', 
+                            'array', 
+                            '', 
+                            'SOAP-ENC:Array', 
+                            array($type => array('name' => $type, 'type' => $type)), 
+                            array(
+                                $type => array('ref' => 'SOAP-ENC:arrayType', 'wsdl:arrayType' => $type . '[]')
+                            ), $type);
+                }
+            }
+        }
     }
 
 }
